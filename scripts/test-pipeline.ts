@@ -35,7 +35,7 @@ const PAGES: Record<string, string | null> = {
   "https://acme.io": "# Acme\nAcme builds AI forecasting software for B2B revenue teams.\nHeadquartered in Austin, Texas.",
   "https://acme.io/about": "## About\nAcme Inc. was founded in 2019. Today we are a team of about 120 people.",
   "https://acme.io/team": "## Leadership\nJane Doe — Head of Sales\nBob Roe — CEO",
-  "https://acme.io/careers": null, // 404
+  "https://acme.io/careers": "## Careers\nWe're hiring! See all open roles at https://jobs.ashbyhq.com/acme and join our growing team of builders.",
 };
 
 function llmReply(system: string, user: string) {
@@ -66,9 +66,12 @@ function llmReply(system: string, user: string) {
   }
   if (system.includes("research questions")) {
     return {
-      answers: [
-        { column_id: "custom_1", value: "No SDR openings listed.", source_url: null, evidence: null, confidence: 0.4 },
-      ],
+      answers: user.includes("https://jobs.ashbyhq.com/acme")
+        ? [
+            { column_id: "custom_1", value: "Yes: 1 open SDR role (Austin)", source_url: "https://jobs.ashbyhq.com/acme", evidence: "Sales Development Representative | Sales | Austin", confidence: 0.9 },
+            { column_id: "custom_2", value: "No SWE interns listed.", source_url: null, evidence: null, confidence: 0.4 },
+          ]
+        : [],
     };
   }
   throw new Error("unexpected LLM call");
@@ -122,6 +125,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       return json({ data: { status: url.searchParams.get("email") === "jane.doe@acme.io" ? "valid" : "unknown" } });
     }
   }
+  if (url.host === "api.ashbyhq.com") {
+    assert.equal(url.pathname, "/posting-api/job-board/acme");
+    return json({ jobs: [{ title: "Sales Development Representative", department: "Sales", location: "Austin" }, { title: "Senior Engineer", department: "Engineering", location: "Remote" }] });
+  }
   if (url.host === "api.anthropic.com") {
     const system = typeof body.system === "string" ? body.system : JSON.stringify(body.system);
     assert.equal(body.model, "claude-sonnet-5");
@@ -156,6 +163,15 @@ async function main() {
   assert.equal(buildEmailFromPattern("{first}.{last}", "José", "O'Brien", "x.com"), "jose.obrien@x.com");
   assert.equal(buildEmailFromPattern("{f}{last}", "Jane", "Doe", "x.com"), "jdoe@x.com");
   assert.equal(buildEmailFromPattern("{first}", "", "Doe", "x.com"), null);
+  const { findJobBoardLinks } = await import("../lib/enrich/jobs");
+  assert.deepEqual(
+    findJobBoardLinks('<a href="https://jobs.ashbyhq.com/posthog/abc">x</a> <script src="https://boards.greenhouse.io/embed/job_board/js?for=vanta"></script> https://jobs.lever.co/zapier'),
+    [
+      { ats: "ashby", token: "posthog" },
+      { ats: "greenhouse", token: "vanta" },
+      { ats: "lever", token: "zapier" },
+    ],
+  );
   assert.deepEqual(splitName("Dr. Jane Q. Doe"), { first: "Jane", last: "Doe" });
   assert.equal(splitName("Cher"), null);
 
@@ -167,7 +183,11 @@ async function main() {
     await enrichDomain(
       "r1",
       "https://www.acme.io/pricing",
-      { persona: "Head of Sales", customColumns: [{ id: "custom_1", prompt: "Are they hiring SDRs?" }] },
+      { persona: "Head of Sales", customColumns: [
+          { id: "custom_1", prompt: "Are they hiring SDRs?" },
+          { id: "custom_2", prompt: "Are they hiring SWE interns?" },
+        ],
+      },
       (e) => {
         if (e.type === "cell") cells[e.field] = e.cell;
         if (e.type === "row_status") statuses.push(e.status + (e.error ? `:${e.error}` : ""));
@@ -188,11 +208,14 @@ async function main() {
   assert.equal(c.persona_name.value, "Jane Doe");
   assert.equal(c.persona_email.value, "jane.doe@acme.io");
   assert.equal(c.email_status.value, "verified");
-  assert.equal(c.custom_1.value, null, "custom answer without source must be null");
+  assert.equal(c.custom_1.value, "Yes: 1 open SDR role (Austin)", "hiring answer should come from the linked job board");
+  assert.equal(c.custom_1.source_url, "https://jobs.ashbyhq.com/acme");
+  assert.equal(c.custom_2.value, null, "custom answer without source must be null");
   for (const [field, cell] of Object.entries(c)) {
     if (cell.value !== null) assert.ok(cell.source_url, `${field} has a value but no source_url`);
   }
-  assert.equal(calls["api.exa.ai/search"], 4 + 1, "4 Exa queries + 1 retried 503");
+  assert.equal(calls["api.exa.ai/search"], 4 + 2 + 1, "4 Exa queries + 1 per custom column + 1 retried 503");
+  assert.equal(calls["api.ashbyhq.com/posting-api/job-board/acme"], 1, "linked Ashby board fetched once");
   if (MODE === "anthropic") assert.ok(first.usage.llm_cost_usd > 0);
   else assert.equal(first.usage.llm_cost_usd, 0, "Gemini free tier costs $0");
 

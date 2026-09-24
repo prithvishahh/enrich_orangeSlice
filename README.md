@@ -30,7 +30,7 @@ Adding a **new** custom column during the call triggers fresh model calls: 10 ro
 - **Row status dot:** grey means queued, pulsing blue means running, green means done, red means error. Hover for the error message or the row's cost.
 - **Email status colors:** `verified` is green, `pattern_guessed` is amber, `not_found` is grey.
 - **Side panel:** shows the value, a confidence bar, the source link, and the evidence quote.
-- **Custom columns:** ask something like "Are they hiring SDRs?" and each row gets a sourced answer from the same scrape and search context.
+- **Custom columns:** ask something like "Are they hiring SDRs?" and each row gets a sourced answer from the same scrape and search context. Each question also gets its own Exa search and the company's open roles, pulled from the free public Ashby, Greenhouse, or Lever job-board APIs. That means hiring questions can be answered "No" with a cited source, not just "Yes".
 - **CSV export:** includes each field's value, source, and confidence.
 
 ## Configuration
@@ -99,4 +99,5 @@ flowchart LR
 - **Pattern-guessed emails cite Hunter's domain page** (`hunter.io/search/<domain>`) as their source, because the address is constructed rather than found. Catch-all domains return `accept_all` and stay `pattern_guessed`.
 - **The cache is per machine.** `.enrich-cache.json` is local (and gitignored). Cached results can be up to 24h old.
 - **Gemini free-tier data use.** Google may use free-tier requests to improve its models. The inputs here are public web pages, but keep that in mind before sending anything private.
+- **Guessed job boards.** If the site doesn't link a job board, the agent tries the domain's first label on Ashby, Greenhouse, and Lever (for example, `posthog` for posthog.com). A board with the same name could belong to a different company. Boards found through a link on the company's own site don't have this problem.
 - **Stop is cooperative.** Rows already in progress on the server finish (and get cached); queued rows are skipped.

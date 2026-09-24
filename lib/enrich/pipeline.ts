@@ -1,6 +1,7 @@
 import { normalizeDomain } from "./domain";
 import { scrapeCompanySite } from "./scrape";
-import { searchFirmographics, searchPersona } from "./exa";
+import { searchFirmographics, searchPersona, searchQuestion } from "./exa";
+import { fetchJobBoards } from "./jobs";
 import {
   buildEmailFromPattern,
   hunterDomainSearch,
@@ -85,7 +86,23 @@ export async function enrichDomain(rowId: string, rawDomain: string, opts: Enric
       for (const [k, v] of Object.entries(fields)) cell(k, v);
       return fields;
     });
-    const customP = answerCustomColumns(domain, opts.customColumns ?? [], docs, meter)
+    // Custom questions also get the company's open roles (job boards) and a
+    // targeted search per question, on top of the shared scrape + search context.
+    const columns = opts.customColumns ?? [];
+    const customP = (async () => {
+      if (!columns.length) return {};
+      const [jobs, ...perQuestion] = await Promise.all([
+        fetchJobBoards(domain, site, meter).catch((err) => {
+          console.warn(`[jobs] ${domain}: ${(err as Error).message}`);
+          return [] as SourceDoc[];
+        }),
+        ...columns.map((c) => searchQuestion(domain, c.prompt, meter)),
+      ]);
+      if (jobs.length) log(`found job board(s): ${jobs.map((d) => d.url).join(", ")}`);
+      const seen = new Set(docs.map((d) => d.url));
+      const extra = [...jobs, ...perQuestion.flat()].filter((d) => !seen.has(d.url) && (seen.add(d.url), true));
+      return answerCustomColumns(domain, columns, [...docs, ...extra], meter);
+    })()
       .then((answers) => {
         for (const [k, v] of Object.entries(answers)) cell(k, v);
       })
