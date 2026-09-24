@@ -1,15 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { callStructured } from "./providers";
 import type { Cell, CustomColumn, FirmographicField, SourceDoc } from "./types";
 import type { UsageMeter } from "./usage";
-
-export const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5";
-const EFFORT = (process.env.ANTHROPIC_EFFORT ?? "medium") as "low" | "medium" | "high";
-
-const g = globalThis as unknown as { __anthropic?: Anthropic };
-// SDK retries 408/409/429/5xx and connection errors twice with backoff by default.
-const client = () => (g.__anthropic ??= new Anthropic({ maxRetries: 2 }));
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -90,27 +82,6 @@ function renderSources(docs: SourceDoc[]): string {
       return `<source ${attrs}>\n${d.text}\n</source>`;
     })
     .join("\n\n");
-}
-
-async function callStructured<T extends z.ZodType>(
-  step: string,
-  schema: T,
-  system: string,
-  user: string,
-  meter: UsageMeter,
-): Promise<z.infer<T>> {
-  const res = await client().messages.parse({
-    model: MODEL,
-    max_tokens: 16000,
-    system,
-    output_config: { effort: EFFORT, format: zodOutputFormat(schema) },
-    messages: [{ role: "user", content: user }],
-  });
-  meter.addLlm(MODEL, step, res.usage);
-  if (res.stop_reason === "refusal") throw new Error(`${step}: model refused (${res.stop_details?.category ?? "unknown"})`);
-  if (res.stop_reason === "max_tokens") throw new Error(`${step}: response truncated at max_tokens`);
-  if (!res.parsed_output) throw new Error(`${step}: could not parse structured output`);
-  return res.parsed_output as z.infer<T>;
 }
 
 // ---------------------------------------------------------------------------

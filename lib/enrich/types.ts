@@ -56,7 +56,7 @@ export interface RowUsage {
   cache_creation_input_tokens: number;
   llm_calls: number;
   llm_cost_usd: number;
-  firecrawl_calls: number;
+  scrape_calls: number;
   exa_calls: number;
   hunter_calls: number;
 }

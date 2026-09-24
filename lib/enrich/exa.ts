@@ -16,6 +16,7 @@ export interface ExaQuery {
 
 /** Exa neural/keyword search with page text. Cached per query. */
 export function exaSearch(q: ExaQuery, meter: UsageMeter): Promise<SourceDoc[]> {
+  if (!process.env.EXA_API_KEY) return Promise.resolve([]); // search is optional; site scrape still runs
   const body = {
     query: q.query,
     type: "auto",

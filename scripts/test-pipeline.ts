@@ -1,6 +1,8 @@
 /**
- * Offline test of the pipeline: every external API (Firecrawl, Exa, Hunter,
- * Anthropic) is mocked at the fetch layer. Exercises domain normalization,
+ * Offline test of the pipeline: every external API (Firecrawl / company
+ * sites, Exa, Hunter, Anthropic / Gemini) is mocked at the fetch layer.
+ * Runs once per mode: TEST_PROVIDER=anthropic (Claude + Firecrawl) or
+ * TEST_PROVIDER=gemini (free mode: Gemini + direct HTML fetch). Exercises domain normalization,
  * retries, grounding validation, email building/verification, streaming
  * events, and the scrape cache.
  *
@@ -8,8 +10,18 @@
  */
 import assert from "node:assert/strict";
 
-process.env.ANTHROPIC_API_KEY = "test";
-process.env.FIRECRAWL_API_KEY = "test";
+const MODE = process.env.TEST_PROVIDER === "gemini" ? "gemini" : "anthropic";
+process.env.ENRICH_DISK_CACHE = "0";
+delete process.env.LLM_PROVIDER;
+if (MODE === "anthropic") {
+  process.env.ANTHROPIC_API_KEY = "test";
+  process.env.FIRECRAWL_API_KEY = "test";
+} else {
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.FIRECRAWL_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  process.env.GEMINI_RPM = "60000";
+}
 process.env.EXA_API_KEY = "test";
 process.env.HUNTER_API_KEY = "test";
 
@@ -74,6 +86,25 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (md === null) return json({ success: true, data: { markdown: "Not found", metadata: { statusCode: 404 } } });
     return json({ success: true, data: { markdown: md, metadata: { sourceURL: body.url, statusCode: 200 } } });
   }
+  if (url.host === "acme.io") {
+    assert.equal(MODE, "gemini", "direct fetch only without Firecrawl key");
+    const md = PAGES[`https://acme.io${url.pathname === "/" ? "" : url.pathname}`];
+    if (!md) return new Response("not found", { status: 404 });
+    const html = `<html><head><title>Acme</title><script>var x=1</script></head><body><nav>Home</nav>${md
+      .split("\n")
+      .map((l) => `<p>${l.replace(/^#+ /, "").replace(/&/g, "&amp;")}</p>`)
+      .join("")}</body></html>`;
+    return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+  if (url.host === "generativelanguage.googleapis.com") {
+    const raw = JSON.stringify(body);
+    assert.ok(raw.includes("responseJsonSchema"), "should request JSON schema output");
+    const out = llmReply(raw, raw);
+    return json({
+      candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify(out) }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 3000, candidatesTokenCount: 400, totalTokenCount: 3400 },
+    });
+  }
   if (url.host === "api.exa.ai") {
     if (exaFailuresLeft-- > 0) return json({ error: "unavailable" }, 503);
     if (body.query.includes("funding")) {
@@ -132,7 +163,7 @@ async function main() {
   const run = async () => {
     const cells: Record<string, { value: string | null; source_url: string | null; confidence: number }> = {};
     const statuses: string[] = [];
-    let usage: { firecrawl_calls: number; exa_calls: number; llm_cost_usd: number } | undefined;
+    let usage: { scrape_calls: number; exa_calls: number; llm_calls: number; llm_cost_usd: number } | undefined;
     await enrichDomain(
       "r1",
       "https://www.acme.io/pricing",
@@ -162,12 +193,14 @@ async function main() {
     if (cell.value !== null) assert.ok(cell.source_url, `${field} has a value but no source_url`);
   }
   assert.equal(calls["api.exa.ai/search"], 4 + 1, "4 Exa queries + 1 retried 503");
-  assert.ok(first.usage.llm_cost_usd > 0);
+  if (MODE === "anthropic") assert.ok(first.usage.llm_cost_usd > 0);
+  else assert.equal(first.usage.llm_cost_usd, 0, "Gemini free tier costs $0");
 
   // Re-run: scrape + search served from cache.
   const second = await run();
-  assert.equal(second.usage.firecrawl_calls, 0, "scrapes should be cached");
+  assert.equal(second.usage.scrape_calls, 0, "scrapes should be cached");
   assert.equal(second.usage.exa_calls, 0, "searches should be cached");
+  assert.equal(second.usage.llm_calls, 0, "LLM results should be cached");
   assert.equal(second.cells.persona_email.value, "jane.doe@acme.io");
 
   // Invalid input surfaces as a row error.
@@ -177,7 +210,7 @@ async function main() {
   });
   assert.deepEqual(errs, ["error"]);
 
-  console.log("\n✅ pipeline tests passed");
+  console.log(`\n✅ pipeline tests passed (${MODE})`);
 }
 
 main().catch((err) => {
