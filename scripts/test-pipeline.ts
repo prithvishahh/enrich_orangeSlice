@@ -1,0 +1,186 @@
+/**
+ * Offline test of the pipeline: every external API (Firecrawl, Exa, Hunter,
+ * Anthropic) is mocked at the fetch layer. Exercises domain normalization,
+ * retries, grounding validation, email building/verification, streaming
+ * events, and the scrape cache.
+ *
+ *   npm run test:pipeline
+ */
+import assert from "node:assert/strict";
+
+process.env.ANTHROPIC_API_KEY = "test";
+process.env.FIRECRAWL_API_KEY = "test";
+process.env.EXA_API_KEY = "test";
+process.env.HUNTER_API_KEY = "test";
+
+const calls: Record<string, number> = {};
+let exaFailuresLeft = 1; // first Exa call returns 503 to exercise retry
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+const PAGES: Record<string, string | null> = {
+  "https://acme.io": "# Acme\nAcme builds AI forecasting software for B2B revenue teams.\nHeadquartered in Austin, Texas.",
+  "https://acme.io/about": "## About\nAcme Inc. was founded in 2019. Today we are a team of about 120 people.",
+  "https://acme.io/team": "## Leadership\nJane Doe — Head of Sales\nBob Roe — CEO",
+  "https://acme.io/careers": null, // 404
+};
+
+function llmReply(system: string, user: string) {
+  const c = (value: unknown, source_url: string | null, evidence: string | null, confidence = 0.9) => ({
+    value,
+    source_url,
+    evidence,
+    confidence,
+  });
+  if (system.includes("firmographics")) {
+    return {
+      company_name: c("Acme Inc.", "https://acme.io/about", "Acme Inc. was founded in 2019"),
+      one_liner: c("AI forecasting software for B2B revenue teams.", "https://acme.io", "Acme builds AI forecasting software for B2B revenue teams"),
+      industry: c("Sales software", "https://made-up.example.com/acme", "totally real"), // hallucinated source -> must be dropped
+      hq_location: c("Austin, Texas, USA", "https://acme.io", "Headquartered in Austin, Texas"),
+      employee_range: c("51-200", "https://acme.io/about", "a team of about 120 people", 0.8),
+      funding_stage: c("Series B", "https://news.example.com/acme-series-b", "Acme raises $25M Series B"),
+      last_round: c("$25M Series B · Mar 2024", "https://news.example.com/acme-series-b", "paraphrase that is not in the text"),
+    };
+  }
+  if (system.includes("identify a specific person")) {
+    assert.ok(user.includes("Acme Inc."), "persona step should receive company name from firmographics");
+    return {
+      persona_name: c("Jane Doe", "https://acme.io/team", "Jane Doe — Head of Sales"),
+      persona_title: c("Head of Sales", "https://acme.io/team", "Jane Doe — Head of Sales"),
+      known_email: null,
+    };
+  }
+  if (system.includes("research questions")) {
+    return {
+      answers: [
+        { column_id: "custom_1", value: "No SDR openings listed.", source_url: null, evidence: null, confidence: 0.4 },
+      ],
+    };
+  }
+  throw new Error("unexpected LLM call");
+}
+
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+  const key = `${url.host}${url.pathname}`;
+  calls[key] = (calls[key] ?? 0) + 1;
+
+  if (url.host === "api.firecrawl.dev") {
+    const md = PAGES[body.url];
+    if (md === undefined) return json({ error: "not found" }, 404);
+    if (md === null) return json({ success: true, data: { markdown: "Not found", metadata: { statusCode: 404 } } });
+    return json({ success: true, data: { markdown: md, metadata: { sourceURL: body.url, statusCode: 200 } } });
+  }
+  if (url.host === "api.exa.ai") {
+    if (exaFailuresLeft-- > 0) return json({ error: "unavailable" }, 503);
+    if (body.query.includes("funding")) {
+      return json({
+        results: [
+          { url: "https://news.example.com/acme-series-b", title: "Acme raises $25M", publishedDate: "2024-03-12", text: "Acme raises $25M Series B led by Example Ventures." },
+        ],
+      });
+    }
+    return json({ results: [] });
+  }
+  if (url.host === "api.hunter.io") {
+    if (url.pathname.endsWith("/domain-search")) return json({ data: { pattern: "{first}.{last}", organization: "Acme", emails: [] } });
+    if (url.pathname.endsWith("/email-verifier")) {
+      return json({ data: { status: url.searchParams.get("email") === "jane.doe@acme.io" ? "valid" : "unknown" } });
+    }
+  }
+  if (url.host === "api.anthropic.com") {
+    const system = typeof body.system === "string" ? body.system : JSON.stringify(body.system);
+    assert.equal(body.model, "claude-sonnet-5");
+    assert.ok(body.output_config?.format?.type === "json_schema", "should request structured output");
+    const out = llmReply(system, body.messages[0].content);
+    return json({
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: JSON.stringify(out) }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 3000, output_tokens: 400, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    });
+  }
+  throw new Error(`unmocked fetch: ${url}`);
+}) as typeof fetch;
+
+async function main() {
+  const { normalizeDomain, parseDomainList } = await import("../lib/enrich/domain");
+  const { buildEmailFromPattern, splitName } = await import("../lib/enrich/hunter");
+  const { enrichDomain } = await import("../lib/enrich/pipeline");
+
+  // --- unit checks ---
+  assert.equal(normalizeDomain("https://www.Stripe.com/about?x=1"), "stripe.com");
+  assert.equal(normalizeDomain("  http://linear.app/  "), "linear.app");
+  assert.equal(normalizeDomain("ramp.com:443/path"), "ramp.com");
+  assert.equal(normalizeDomain("not a domain"), null);
+  assert.equal(normalizeDomain("192.168.0.1"), null);
+  assert.deepEqual(parseDomainList("stripe.com\nhttps://www.stripe.com\nramp.com, linear.app\n\n"), ["stripe.com", "ramp.com", "linear.app"]);
+  assert.equal(buildEmailFromPattern("{first}.{last}", "José", "O'Brien", "x.com"), "jose.obrien@x.com");
+  assert.equal(buildEmailFromPattern("{f}{last}", "Jane", "Doe", "x.com"), "jdoe@x.com");
+  assert.equal(buildEmailFromPattern("{first}", "", "Doe", "x.com"), null);
+  assert.deepEqual(splitName("Dr. Jane Q. Doe"), { first: "Jane", last: "Doe" });
+  assert.equal(splitName("Cher"), null);
+
+  // --- full pipeline, mocked ---
+  const run = async () => {
+    const cells: Record<string, { value: string | null; source_url: string | null; confidence: number }> = {};
+    const statuses: string[] = [];
+    let usage: { firecrawl_calls: number; exa_calls: number; llm_cost_usd: number } | undefined;
+    await enrichDomain(
+      "r1",
+      "https://www.acme.io/pricing",
+      { persona: "Head of Sales", customColumns: [{ id: "custom_1", prompt: "Are they hiring SDRs?" }] },
+      (e) => {
+        if (e.type === "cell") cells[e.field] = e.cell;
+        if (e.type === "row_status") statuses.push(e.status + (e.error ? `:${e.error}` : ""));
+        if (e.type === "row_cost") usage = e.usage;
+      },
+    );
+    return { cells, statuses, usage: usage! };
+  };
+
+  const first = await run();
+  assert.deepEqual(first.statuses, ["running", "done"]);
+  const c = first.cells;
+  assert.equal(c.company_name.value, "Acme Inc.");
+  assert.equal(c.company_name.source_url, "https://acme.io/about");
+  assert.equal(c.industry.value, null, "value citing an unknown URL must be dropped");
+  assert.equal(c.last_round.value, "$25M Series B · Mar 2024");
+  assert.ok(c.last_round.confidence < 0.9, "unverifiable evidence quote should lower confidence");
+  assert.equal(c.persona_name.value, "Jane Doe");
+  assert.equal(c.persona_email.value, "jane.doe@acme.io");
+  assert.equal(c.email_status.value, "verified");
+  assert.equal(c.custom_1.value, null, "custom answer without source must be null");
+  for (const [field, cell] of Object.entries(c)) {
+    if (cell.value !== null) assert.ok(cell.source_url, `${field} has a value but no source_url`);
+  }
+  assert.equal(calls["api.exa.ai/search"], 4 + 1, "4 Exa queries + 1 retried 503");
+  assert.ok(first.usage.llm_cost_usd > 0);
+
+  // Re-run: scrape + search served from cache.
+  const second = await run();
+  assert.equal(second.usage.firecrawl_calls, 0, "scrapes should be cached");
+  assert.equal(second.usage.exa_calls, 0, "searches should be cached");
+  assert.equal(second.cells.persona_email.value, "jane.doe@acme.io");
+
+  // Invalid input surfaces as a row error.
+  const errs: string[] = [];
+  await enrichDomain("r2", "not a domain", { persona: "Head of Sales" }, (e) => {
+    if (e.type === "row_status") errs.push(e.status);
+  });
+  assert.deepEqual(errs, ["error"]);
+
+  console.log("\n✅ pipeline tests passed");
+}
+
+main().catch((err) => {
+  console.error("\n❌", err);
+  process.exit(1);
+});
