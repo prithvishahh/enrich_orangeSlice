@@ -162,7 +162,9 @@ export async function answerCustomColumns(
   meter: UsageMeter,
 ): Promise<Record<string, Cell>> {
   if (!columns.length) return {};
-  const system = `You answer research questions about a company for sales teams. Return strict JSON matching the schema, one answer per column_id.\n\n${GROUNDING_RULES}`;
+  const system = `You answer research questions about a company for sales teams. Return strict JSON matching the schema, one answer per column_id.\n\n${GROUNDING_RULES}
+- Lead with a direct answer, then the specifics that back it, e.g. "Yes: 2 open SDR roles (NYC, Remote)".
+- A "No" also needs a source. You may answer "No" when a source is a complete listing that would show it (e.g. a job board listing all open roles: "No: 14 open roles, none in sales development"). Absence from an unrelated page is not evidence; return null instead.`;
   const questions = columns.map((c) => `- column_id="${c.id}": ${c.prompt}`).join("\n");
   const user = `Company domain: ${domain}\n\n${renderSources(docs)}\n\nAnswer each question about the company at ${domain}:\n${questions}`;
   const out = await callStructured("custom_columns", CustomSchema, system, user, meter);

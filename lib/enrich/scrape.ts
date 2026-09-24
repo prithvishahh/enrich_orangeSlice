@@ -49,9 +49,11 @@ async function scrapeDirect(url: string): Promise<SourceDoc | null> {
   if (res.status === 404 || res.status === 410) return null;
   if (!res.ok) throw new HttpError(`GET ${url} -> ${res.status}`, res.status);
   if (!(res.headers.get("content-type") ?? "").includes("html")) return null;
-  const { title, text } = htmlToText(await res.text());
+  const html = await res.text();
+  const { title, text } = htmlToText(html);
   if (text.length < 50) return null;
-  return { url: res.url || url, title, kind: "scrape", text: clip(text) };
+  const links = [...new Set(html.match(/https?:\/\/[^"'\s<>)]*(?:ashbyhq\.com|greenhouse\.io|lever\.co)[^"'\s<>)]*/g) ?? [])];
+  return { url: res.url || url, title, kind: "scrape", text: clip(text), ...(links.length ? { links } : {}) };
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…" };
@@ -105,7 +107,7 @@ export function htmlToText(html: string): { title?: string; text: string } {
 /** Scrape one URL. Returns null for 404s / empty pages. Cached per URL. */
 export function scrapeUrl(url: string, meter: UsageMeter): Promise<SourceDoc | null> {
   const useFirecrawl = !!process.env.FIRECRAWL_API_KEY;
-  return cached(`scrape:${useFirecrawl ? "fc" : "direct"}:${url}`, async () => {
+  return cached(`scrape:v2:${useFirecrawl ? "fc" : "direct"}:${url}`, async () => {
     meter.count("scrape");
     try {
       return await withRetry(`scrape ${url}`, () => (useFirecrawl ? scrapeFirecrawl(url) : scrapeDirect(url)));

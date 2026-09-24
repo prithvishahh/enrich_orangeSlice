@@ -68,4 +68,6 @@ export interface SourceDoc {
   kind: "scrape" | "search";
   published?: string;
   text: string;
+  /** Job-board (ATS) URLs found in the page's raw HTML, which the text conversion drops. */
+  links?: string[];
 }

@@ -59,6 +59,16 @@ export async function searchFirmographics(domain: string, meter: UsageMeter): Pr
   });
 }
 
+/** Targeted search for one custom-column question. */
+export async function searchQuestion(domain: string, question: string, meter: UsageMeter): Promise<SourceDoc[]> {
+  try {
+    return await exaSearch({ query: `${domain} ${question}`, numResults: 4, maxCharacters: 2500 }, meter);
+  } catch (err) {
+    console.warn(`[exa] question "${question}" failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
 /** Search for the person holding `persona` at the company. */
 export async function searchPersona(domain: string, company: string | null, persona: string, meter: UsageMeter) {
   const who = company ? `${company} (${domain})` : domain;
