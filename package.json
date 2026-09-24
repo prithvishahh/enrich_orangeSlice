@@ -9,10 +9,11 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "enrich": "tsx scripts/enrich-one.ts",
-    "test:pipeline": "tsx scripts/test-pipeline.ts"
+    "test:pipeline": "tsx scripts/test-pipeline.ts && TEST_PROVIDER=gemini tsx scripts/test-pipeline.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
+    "@google/genai": "^2.24.0",
     "ag-grid-community": "^32.3.9",
     "ag-grid-react": "^32.3.9",
     "next": "^14.2.35",

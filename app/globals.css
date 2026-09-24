@@ -1,3 +1,19 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.ag-theme-quartz.enrich-grid {
+  --ag-font-family: inherit;
+  --ag-font-size: 13px;
+  --ag-border-radius: 0;
+  --ag-wrapper-border-radius: 0;
+  --ag-cell-horizontal-padding: 10px;
+  --ag-value-change-value-highlight-background-color: rgba(59, 130, 246, 0.12);
+}
+.enrich-grid .ag-root-wrapper {
+  border: none;
+}

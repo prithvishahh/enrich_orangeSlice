@@ -73,7 +73,7 @@ async function main() {
     const u = cost.usage;
     console.log(
       `\nCost: $${u.llm_cost_usd.toFixed(4)} LLM (${u.input_tokens} in / ${u.output_tokens} out tokens, ${u.llm_calls} calls) · ` +
-        `firecrawl ${u.firecrawl_calls} · exa ${u.exa_calls} · hunter ${u.hunter_calls}`,
+        `pages ${u.scrape_calls} · exa ${u.exa_calls} · hunter ${u.hunter_calls}`,
     );
   }
 }

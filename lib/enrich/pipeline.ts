@@ -1,5 +1,5 @@
 import { normalizeDomain } from "./domain";
-import { scrapeCompanySite } from "./firecrawl";
+import { scrapeCompanySite } from "./scrape";
 import { searchFirmographics, searchPersona } from "./exa";
 import {
   buildEmailFromPattern,
@@ -61,10 +61,14 @@ export async function enrichDomain(rowId: string, rawDomain: string, opts: Enric
 
   try {
     // 1 + 2 (+ Hunter domain search, needed later): all independent, run in parallel.
-    const hunterP = hunterDomainSearch(domain, meter).catch((err) => {
-      fail("hunter", err);
-      return null;
-    });
+    if (!process.env.HUNTER_API_KEY) log("HUNTER_API_KEY not set: emails will be not_found");
+    if (!process.env.EXA_API_KEY) log("EXA_API_KEY not set: skipping web search");
+    const hunterP = process.env.HUNTER_API_KEY
+      ? hunterDomainSearch(domain, meter).catch((err) => {
+          fail("hunter", err);
+          return null;
+        })
+      : Promise.resolve(null);
     const [site, search] = await Promise.all([
       scrapeCompanySite(domain, meter).catch((err) => {
         fail("scrape", err);
