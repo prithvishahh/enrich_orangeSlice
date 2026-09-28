@@ -101,6 +101,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
   }
   if (url.host === "generativelanguage.googleapis.com") {
+    if (url.pathname.includes("gemini-busy")) {
+      return json({ error: { code: 503, status: "UNAVAILABLE", message: "This model is currently experiencing high demand." } }, 503);
+    }
     if (url.pathname.includes("gemini-retired")) {
       return json({ error: { code: 404, status: "NOT_FOUND", message: "This model models/gemini-retired is no longer available to new users." } }, 404);
     }
@@ -250,8 +253,26 @@ async function main() {
   assert.deepEqual(errs, ["error"]);
 
   if (MODE === "gemini") {
-    // Used-up daily quota: the row fails fast with a clear message instead of retrying for minutes.
     const { clearCache } = await import("../lib/enrich/cache");
+    const geminiCalls = (m: string) => calls[`generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`] ?? 0;
+
+    // Switching models reuses results saved under any model in the list: no new calls.
+    process.env.GEMINI_MODEL = "gemini-retired, gemini-flash-latest";
+    const reused = await run();
+    assert.equal(reused.usage.llm_calls, 0, "cached results from the fallback model should be reused");
+    assert.equal(geminiCalls("gemini-retired"), 0);
+    assert.equal(reused.cells.company_name.value, "Acme Inc.");
+
+    // Overloaded first model (503): falls back to the next model and succeeds.
+    clearCache("llm:");
+    process.env.GEMINI_MODEL = "gemini-busy,gemini-flash-latest";
+    const fallback = await run();
+    delete process.env.GEMINI_MODEL;
+    assert.deepEqual(fallback.statuses, ["running", "done"]);
+    assert.equal(fallback.cells.company_name.value, "Acme Inc.");
+    assert.equal(geminiCalls("gemini-busy"), 3 * 2, "each of 3 steps tries the busy model twice before falling back");
+
+    // Used-up daily quota: the row fails fast with a clear message instead of retrying for minutes.
     clearCache("llm:");
     geminiDailyQuotaUsedUp = true;
     const before = calls["generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"] ?? 0;

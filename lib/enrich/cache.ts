@@ -79,6 +79,20 @@ export function cached<T>(key: string, fn: () => Promise<T>, ttlMs = DEFAULT_TTL
   return value;
 }
 
+/** Cached value for `key` (memory or disk) without computing it, or undefined. */
+export function peekCached<T>(key: string): Promise<T> | undefined {
+  const hit = store.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value as Promise<T>;
+  const saved = diskEnabled() ? disk()[key] : undefined;
+  if (saved && saved.expires > Date.now()) return cached(key, () => Promise.resolve(saved.value as T));
+  return undefined;
+}
+
+/** Store an already-computed value. */
+export function remember<T>(key: string, value: T): void {
+  void cached(key, () => Promise.resolve(value));
+}
+
 export function clearCache(prefix?: string) {
   for (const k of store.keys()) if (!prefix || k.startsWith(prefix)) store.delete(k);
   const d = disk();

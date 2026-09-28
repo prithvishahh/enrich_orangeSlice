@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
-import { cached } from "./cache";
+import { cached, peekCached, remember } from "./cache";
 import { HttpError, withRetry } from "./http";
 import type { UsageMeter } from "./usage";
 
@@ -23,10 +23,17 @@ export function activeProvider(): Provider {
   throw new Error("No LLM key. Set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in .env.local.");
 }
 
+/**
+ * GEMINI_MODEL may be a comma-separated list, tried in order: when a model is
+ * overloaded (503), retired (404) or out of quota, calls fall through to the next.
+ */
+export function geminiModels(): string[] {
+  const list = (process.env.GEMINI_MODEL ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  return list.length ? list : ["gemini-flash-latest"];
+}
+
 export function activeModel(provider = activeProvider()): string {
-  return provider === "anthropic"
-    ? (process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5")
-    : (process.env.GEMINI_MODEL ?? "gemini-flash-latest");
+  return provider === "anthropic" ? (process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5") : geminiModels().join(", ");
 }
 
 const g = globalThis as unknown as {
@@ -69,13 +76,35 @@ export function callStructured<T extends z.ZodType>(
   meter: UsageMeter,
 ): Promise<z.infer<T>> {
   const provider = activeProvider();
-  const model = activeModel(provider);
-  const key = `llm:${model}:${step}:${createHash("sha256").update(system).update("\0").update(user).digest("hex")}`;
-  return cached(key, () =>
-    provider === "anthropic"
-      ? callAnthropic(model, step, schema, system, user, meter)
-      : callGemini(model, step, schema, system, user, meter),
-  ) as Promise<z.infer<T>>;
+  const hash = createHash("sha256").update(system).update("\0").update(user).digest("hex");
+  const keyFor = (model: string) => `llm:${model}:${step}:${hash}`;
+
+  if (provider === "anthropic") {
+    const model = activeModel(provider);
+    return cached(keyFor(model), () => callAnthropic(model, step, schema, system, user, meter)) as Promise<z.infer<T>>;
+  }
+
+  return (async () => {
+    const models = geminiModels();
+    // Reuse a result from any configured model, so switching models keeps finished work.
+    for (const m of models) {
+      const hit = peekCached<z.infer<T>>(keyFor(m));
+      if (hit) return hit;
+    }
+    let lastErr: unknown;
+    for (const [i, model] of models.entries()) {
+      const hasFallback = i < models.length - 1;
+      try {
+        const data = await callGemini(model, step, schema, system, user, meter, hasFallback ? 1 : 3, hasFallback ? 1500 : 4000);
+        remember(keyFor(model), data);
+        return data;
+      } catch (err) {
+        lastErr = err;
+        if (hasFallback) console.warn(`[gemini] ${model} failed for ${step} (${(err as Error).message.slice(0, 120)}); falling back to ${models[i + 1]}`);
+      }
+    }
+    throw lastErr;
+  })();
 }
 
 async function callAnthropic<T extends z.ZodType>(
@@ -142,11 +171,13 @@ async function callGemini<T extends z.ZodType>(
   system: string,
   user: string,
   meter: UsageMeter,
+  retries: number,
+  backoffMs: number,
 ): Promise<z.infer<T>> {
   const client = (g.__gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }));
   const responseJsonSchema = toGeminiSchema(schema);
 
-  // Free-tier 429s are common: 3 retries with long backoff (4s, 8s, 16s).
+  // Free-tier 429/503s are common: retry with long backoff (4s, 8s, 16s), fewer when a fallback model exists.
   return withRetry(
     `gemini ${step}`,
     async () => {
@@ -174,7 +205,7 @@ async function callGemini<T extends z.ZodType>(
         if (status === 429) {
           const { daily, retryMs } = geminiRateLimit(fullMessage);
           if (daily) {
-            const message = `Gemini free-tier daily quota for ${model} is used up. Use a key from another Google project, or set GEMINI_MODEL to a different model.`;
+            const message = `Gemini free-tier daily quota for ${model} is used up. Use a key from another Google project, or add another model to GEMINI_MODEL.`;
             g.__geminiDailyExhausted = { model, message, until: Date.now() + 60 * 60 * 1000 };
             console.error(`[gemini] ${message}`);
             throw new HttpError(message, 429, undefined, false);
@@ -199,7 +230,7 @@ async function callGemini<T extends z.ZodType>(
       if (!parsed.success) throw new HttpError(`gemini ${step}: output failed schema: ${parsed.error.message.slice(0, 200)}`, 500);
       return parsed.data as z.infer<T>;
     },
-    3,
-    4000,
+    retries,
+    backoffMs,
   );
 }
