@@ -27,6 +27,7 @@ process.env.HUNTER_API_KEY = "test";
 
 const calls: Record<string, number> = {};
 let exaFailuresLeft = 1; // first Exa call returns 503 to exercise retry
+let geminiDailyQuotaUsedUp = false;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -100,6 +101,18 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
   }
   if (url.host === "generativelanguage.googleapis.com") {
+    if (geminiDailyQuotaUsedUp) {
+      return json(
+        {
+          error: {
+            code: 429,
+            status: "RESOURCE_EXHAUSTED",
+            message: "You exceeded your current quota. Quota exceeded for metric: generate_content_free_tier_requests, quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier. Please retry in 41.2s.",
+          },
+        },
+        429,
+      );
+    }
     const raw = JSON.stringify(body);
     assert.ok(raw.includes("responseJsonSchema"), "should request JSON schema output");
     const out = llmReply(raw, raw);
@@ -232,6 +245,23 @@ async function main() {
     if (e.type === "row_status") errs.push(e.status);
   });
   assert.deepEqual(errs, ["error"]);
+
+  if (MODE === "gemini") {
+    // Used-up daily quota: the row fails fast with a clear message instead of retrying for minutes.
+    const { clearCache } = await import("../lib/enrich/cache");
+    clearCache("llm:");
+    geminiDailyQuotaUsedUp = true;
+    const before = calls["generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"] ?? 0;
+    const t0 = Date.now();
+    let error = "";
+    await enrichDomain("r3", "acme.io", { persona: "Head of Sales" }, (e) => {
+      if (e.type === "row_status" && e.error) error = e.error;
+    });
+    assert.ok(Date.now() - t0 < 3000, `quota error should fail fast (took ${Date.now() - t0}ms)`);
+    assert.match(error, /daily quota/);
+    const after = calls["generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"] ?? 0;
+    assert.equal(after - before, 1, "only one request should hit Google once the daily quota is known to be used up");
+  }
 
   console.log(`\n✅ pipeline tests passed (${MODE})`);
 }

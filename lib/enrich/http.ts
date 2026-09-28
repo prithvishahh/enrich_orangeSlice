@@ -4,6 +4,8 @@ export class HttpError extends Error {
     message: string,
     readonly status: number,
     readonly body?: string,
+    /** Force retry on/off regardless of status (e.g. a used-up daily quota is a 429 that won't clear). */
+    readonly retryable?: boolean,
   ) {
     super(message);
   }
@@ -12,6 +14,7 @@ export class HttpError extends Error {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function isRetryable(err: unknown): boolean {
+  if (err instanceof HttpError && err.retryable !== undefined) return err.retryable;
   if (err instanceof HttpError) return err.status === 408 || err.status === 429 || err.status >= 500;
   return true; // network errors, timeouts
 }

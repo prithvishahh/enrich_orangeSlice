@@ -340,6 +340,7 @@ export default function EnrichApp({ initialDomains = [], title }: { initialDomai
   // ---- derived ----
   const filled = rows.filter((r) => r.domain.trim());
   const doneCount = filled.filter((r) => r.status === "done" || r.status === "error").length;
+  const quotaError = filled.find((r) => r.error?.includes("daily quota"))?.error?.split("; ")[0].replace(/^\w[\w ]*: /, "");
   const totalCost = filled.reduce((s, r) => s + (r.cost?.llm_cost_usd ?? 0), 0);
   const selRow = selected ? rows.find((r) => r.id === selected.rowId) : undefined;
   const selCell = selected && selRow ? selRow.cells[selected.field] : undefined;
@@ -438,6 +439,9 @@ export default function EnrichApp({ initialDomains = [], title }: { initialDomai
           {!config.keys.exa && "EXA_API_KEY missing: no funding/people search. "}
           {!config.keys.hunter && "HUNTER_API_KEY missing: emails will be not_found."}
         </div>
+      )}
+      {quotaError && (
+        <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{quotaError}</div>
       )}
       {fatal && (
         <div className="flex items-center justify-between border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">

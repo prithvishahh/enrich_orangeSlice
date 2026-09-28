@@ -29,7 +29,23 @@ export function activeModel(provider = activeProvider()): string {
     : (process.env.GEMINI_MODEL ?? "gemini-flash-latest");
 }
 
-const g = globalThis as unknown as { __anthropic?: Anthropic; __gemini?: GoogleGenAI; __geminiNext?: number };
+const g = globalThis as unknown as {
+  __anthropic?: Anthropic;
+  __gemini?: GoogleGenAI;
+  __geminiNext?: number;
+  /** Set when Google reports the free-tier daily quota is used up; later calls fail fast. */
+  __geminiDailyExhausted?: { model: string; message: string; until: number };
+};
+
+const GEMINI_TIMEOUT_MS = 60_000;
+
+/** Classify a Gemini 429: a daily quota won't clear by retrying; a per-minute one says how long to wait. */
+function geminiRateLimit(err: ApiError): { daily: boolean; retryMs: number } {
+  const msg = err.message;
+  const daily = /PerDay|per day|daily/i.test(msg);
+  const secs = Number(msg.match(/retry in ([\d.]+)s/i)?.[1] ?? msg.match(/"retryDelay":\s*"(\d+(?:\.\d+)?)s"/)?.[1] ?? 0);
+  return { daily, retryMs: Math.min(60_000, Math.ceil(secs * 1000)) };
+}
 
 /**
  * Structured call. Results are cached by a hash of (model, prompt), so
@@ -124,16 +140,35 @@ async function callGemini<T extends z.ZodType>(
   return withRetry(
     `gemini ${step}`,
     async () => {
+      const exhausted = g.__geminiDailyExhausted;
+      if (exhausted && exhausted.model === model && exhausted.until > Date.now()) throw new HttpError(exhausted.message, 429, undefined, false);
       await geminiSlot();
       let res;
       try {
         res = await client.models.generateContent({
           model,
           contents: user,
-          config: { systemInstruction: system, responseMimeType: "application/json", responseJsonSchema, temperature: 0 },
+          config: {
+            systemInstruction: system,
+            responseMimeType: "application/json",
+            responseJsonSchema,
+            temperature: 0,
+            httpOptions: { timeout: GEMINI_TIMEOUT_MS },
+          },
         });
       } catch (err) {
         // Normalize to HttpError so withRetry can tell 429/5xx from 4xx.
+        if (err instanceof ApiError && err.status === 429) {
+          const { daily, retryMs } = geminiRateLimit(err);
+          if (daily) {
+            const message = `Gemini free-tier daily quota for ${model} is used up. Use a key from another Google project, or set GEMINI_MODEL to a different model.`;
+            g.__geminiDailyExhausted = { model, message, until: Date.now() + 60 * 60 * 1000 };
+            console.error(`[gemini] ${message}`);
+            throw new HttpError(message, 429, undefined, false);
+          }
+          // Per-minute limit: push every queued Gemini call back by Google's suggested delay.
+          if (retryMs) g.__geminiNext = Math.max(g.__geminiNext ?? 0, Date.now() + retryMs);
+        }
         if (err instanceof ApiError) throw new HttpError(`gemini ${step} -> ${err.status}: ${err.message.slice(0, 200)}`, err.status);
         throw err;
       }
