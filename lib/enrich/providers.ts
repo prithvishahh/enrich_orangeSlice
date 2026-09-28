@@ -41,7 +41,7 @@ const g = globalThis as unknown as {
   __gemini?: GoogleGenAI;
   __geminiNext?: number;
   /** Set when Google reports the free-tier daily quota is used up; later calls fail fast. */
-  __geminiDailyExhausted?: { model: string; message: string; until: number };
+  __geminiDailyExhausted?: Record<string, { message: string; until: number }>;
 };
 
 const GEMINI_TIMEOUT_MS = 60_000;
@@ -94,6 +94,9 @@ export function callStructured<T extends z.ZodType>(
     let lastErr: unknown;
     for (const [i, model] of models.entries()) {
       const hasFallback = i < models.length - 1;
+      // Skip a model whose daily quota is already known to be used up (logged once when detected).
+      const exhausted = g.__geminiDailyExhausted?.[model];
+      if (hasFallback && exhausted && exhausted.until > Date.now()) continue;
       try {
         const data = await callGemini(model, step, schema, system, user, meter, hasFallback ? 1 : 3, hasFallback ? 1500 : 4000);
         remember(keyFor(model), data);
@@ -181,8 +184,8 @@ async function callGemini<T extends z.ZodType>(
   return withRetry(
     `gemini ${step}`,
     async () => {
-      const exhausted = g.__geminiDailyExhausted;
-      if (exhausted && exhausted.model === model && exhausted.until > Date.now()) throw new HttpError(exhausted.message, 429, undefined, false);
+      const exhausted = g.__geminiDailyExhausted?.[model];
+      if (exhausted && exhausted.until > Date.now()) throw new HttpError(exhausted.message, 429, undefined, false);
       await geminiSlot();
       let res;
       try {
@@ -206,7 +209,7 @@ async function callGemini<T extends z.ZodType>(
           const { daily, retryMs } = geminiRateLimit(fullMessage);
           if (daily) {
             const message = `Gemini free-tier daily quota for ${model} is used up. Use a key from another Google project, or add another model to GEMINI_MODEL.`;
-            g.__geminiDailyExhausted = { model, message, until: Date.now() + 60 * 60 * 1000 };
+            (g.__geminiDailyExhausted ??= {})[model] = { message, until: Date.now() + 60 * 60 * 1000 };
             console.error(`[gemini] ${message}`);
             throw new HttpError(message, 429, undefined, false);
           }
