@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { ApiError, GoogleGenAI } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { cached } from "./cache";
 import { HttpError, withRetry } from "./http";
@@ -40,8 +40,18 @@ const g = globalThis as unknown as {
 const GEMINI_TIMEOUT_MS = 60_000;
 
 /** Classify a Gemini 429: a daily quota won't clear by retrying; a per-minute one says how long to wait. */
-function geminiRateLimit(err: ApiError): { daily: boolean; retryMs: number } {
-  const msg = err.message;
+/**
+ * HTTP status of a Gemini SDK error. Duck-typed rather than `instanceof ApiError`,
+ * because Next.js can bundle a second copy of the SDK's error class.
+ */
+function geminiStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === "number") return status;
+  const code = String((err as Error)?.message ?? "").match(/"code":\s*(\d{3})/)?.[1];
+  return code ? Number(code) : undefined;
+}
+
+function geminiRateLimit(msg: string): { daily: boolean; retryMs: number } {
   const daily = /PerDay|per day|daily/i.test(msg);
   const secs = Number(msg.match(/retry in ([\d.]+)s/i)?.[1] ?? msg.match(/"retryDelay":\s*"(\d+(?:\.\d+)?)s"/)?.[1] ?? 0);
   return { daily, retryMs: Math.min(60_000, Math.ceil(secs * 1000)) };
@@ -158,8 +168,11 @@ async function callGemini<T extends z.ZodType>(
         });
       } catch (err) {
         // Normalize to HttpError so withRetry can tell 429/5xx from 4xx.
-        if (err instanceof ApiError && err.status === 429) {
-          const { daily, retryMs } = geminiRateLimit(err);
+        const status = geminiStatus(err);
+        const fullMessage = String((err as Error)?.message ?? err);
+        const detail = fullMessage.slice(0, 300);
+        if (status === 429) {
+          const { daily, retryMs } = geminiRateLimit(fullMessage);
           if (daily) {
             const message = `Gemini free-tier daily quota for ${model} is used up. Use a key from another Google project, or set GEMINI_MODEL to a different model.`;
             g.__geminiDailyExhausted = { model, message, until: Date.now() + 60 * 60 * 1000 };
@@ -169,7 +182,7 @@ async function callGemini<T extends z.ZodType>(
           // Per-minute limit: push every queued Gemini call back by Google's suggested delay.
           if (retryMs) g.__geminiNext = Math.max(g.__geminiNext ?? 0, Date.now() + retryMs);
         }
-        if (err instanceof ApiError) throw new HttpError(`gemini ${step} -> ${err.status}: ${err.message.slice(0, 200)}`, err.status);
+        if (status) throw new HttpError(`gemini ${step} -> ${status}: ${detail}`, status);
         throw err;
       }
       const u = res.usageMetadata;

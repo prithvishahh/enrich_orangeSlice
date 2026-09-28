@@ -101,6 +101,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
   }
   if (url.host === "generativelanguage.googleapis.com") {
+    if (url.pathname.includes("gemini-retired")) {
+      return json({ error: { code: 404, status: "NOT_FOUND", message: "This model models/gemini-retired is no longer available to new users." } }, 404);
+    }
     if (geminiDailyQuotaUsedUp) {
       return json(
         {
@@ -261,6 +264,19 @@ async function main() {
     assert.match(error, /daily quota/);
     const after = calls["generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"] ?? 0;
     assert.equal(after - before, 1, "only one request should hit Google once the daily quota is known to be used up");
+
+    // Retired model (404): not retried, fails fast with Google's message.
+    geminiDailyQuotaUsedUp = false;
+    process.env.GEMINI_MODEL = "gemini-retired";
+    const t1 = Date.now();
+    let error404 = "";
+    await enrichDomain("r4", "acme.io", { persona: "Head of Sales" }, (e) => {
+      if (e.type === "row_status" && e.error) error404 = e.error;
+    });
+    delete process.env.GEMINI_MODEL;
+    assert.ok(Date.now() - t1 < 3000, `404 should not be retried (took ${Date.now() - t1}ms)`);
+    assert.match(error404, /404.*no longer available/);
+    assert.equal(calls["generativelanguage.googleapis.com/v1beta/models/gemini-retired:generateContent"], 2, "firmographics + persona, one request each");
   }
 
   console.log(`\n✅ pipeline tests passed (${MODE})`);
